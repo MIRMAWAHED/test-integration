@@ -1,0 +1,18 @@
+{
+  "providerKey": "google",
+  "displayName": "Google",
+  "authorizationUrl": "https://accounts.google.com/o/oauth2/v2/auth",
+  "tokenUrl": "https://oauth2.googleapis.com/token",
+  "userinfoUrl": "https://www.googleapis.com/oauth2/v3/userinfo",
+  "revokeUrl": "https://oauth2.googleapis.com/revoke",
+  "clientId": "<GOOGLE_CLIENT_ID>",
+  "clientSecret": "<GOOGLE_CLIENT_SECRET>",
+  "defaultScopes": ["openid", "email", "profile"],
+  "tokenAuthMethod": "client_secret_post",
+  "pkceEnabled": true,
+  "userinfoMapping": {
+    "providerUserId": ["sub", "email"],
+    "displayName": ["name", "email"]
+  },
+  "enabled": true
+}

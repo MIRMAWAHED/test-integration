@@ -1,0 +1,18 @@
+{
+  "providerKey": "apitrench-fixture",
+  "displayName": "APITrench Fixture OAuth",
+  "authorizationUrl": "https://YOUR-FLY-APP.fly.dev/oauth/authorize",
+  "tokenUrl": "https://YOUR-FLY-APP.fly.dev/oauth/token",
+  "userinfoUrl": "https://YOUR-FLY-APP.fly.dev/oauth/userinfo",
+  "revokeUrl": "https://YOUR-FLY-APP.fly.dev/oauth/revoke",
+  "clientId": "apitrench-client",
+  "clientSecret": "apitrench-secret",
+  "defaultScopes": ["profile", "email", "read:data", "mint:jwt"],
+  "tokenAuthMethod": "client_secret_post",
+  "pkceEnabled": true,
+  "userinfoMapping": {
+    "providerUserId": ["sub", "email"],
+    "displayName": ["name", "email"]
+  },
+  "enabled": true
+}
