@@ -44,6 +44,48 @@ function randomToken(prefix) {
   return `${prefix}_${crypto.randomBytes(18).toString('base64url')}`;
 }
 
+function stableJson(value) {
+  return JSON.stringify(value);
+}
+
+function signExternalOAuthState(payload) {
+  const encodedPayload = Buffer.from(stableJson(payload), 'utf8').toString('base64url');
+  const signature = crypto
+    .createHmac('sha256', FIXTURE.jwtSecret)
+    .update(encodedPayload)
+    .digest('base64url');
+
+  return `statev1.${encodedPayload}.${signature}`;
+}
+
+function verifyExternalOAuthState(state) {
+  if (!state || typeof state !== 'string') return null;
+
+  const parts = state.split('.');
+  if (parts.length !== 3 || parts[0] !== 'statev1') return null;
+
+  const [, encodedPayload, signature] = parts;
+  const expectedSignature = crypto
+    .createHmac('sha256', FIXTURE.jwtSecret)
+    .update(encodedPayload)
+    .digest('base64url');
+
+  const actual = Buffer.from(signature);
+  const expected = Buffer.from(expectedSignature);
+
+  if (actual.length !== expected.length || !crypto.timingSafeEqual(actual, expected)) {
+    return null;
+  }
+
+  try {
+    const parsed = JSON.parse(Buffer.from(encodedPayload, 'base64url').toString('utf8'));
+    if (!parsed || typeof parsed !== 'object') return null;
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
 function sha256Base64Url(value) {
   return crypto.createHash('sha256').update(value).digest('base64url');
 }
@@ -349,11 +391,20 @@ function assertExternalOAuthConfigured(provider) {
 
 function buildExternalOAuthAuthorizationUrl(provider) {
   const config = assertExternalOAuthConfigured(provider);
-  const state = randomToken(`${provider}_state`);
+  const now = Date.now();
+  const state = signExternalOAuthState({
+    provider,
+    nonce: randomToken(`${provider}_state`),
+    iat: now,
+    exp: now + 10 * 60 * 1000,
+  });
+
+  // Keep a best-effort local record for debugging only. The signed state above
+  // is the source of truth, so OAuth survives Render sleep/restarts.
   externalOAuthStateStore.set(state, {
     provider,
-    createdAt: Date.now(),
-    expiresAt: Date.now() + 10 * 60 * 1000,
+    createdAt: now,
+    expiresAt: now + 10 * 60 * 1000,
   });
 
   const url = new URL(config.authorizationUrl);
@@ -372,15 +423,23 @@ function buildExternalOAuthAuthorizationUrl(provider) {
 }
 
 function consumeExternalOAuthState(provider, state) {
-  const record = state ? externalOAuthStateStore.get(state) : null;
+  const signedRecord = verifyExternalOAuthState(state);
+  const localRecord = state ? externalOAuthStateStore.get(state) : null;
+  const record = signedRecord ?? localRecord;
 
-  if (!record || record.provider !== provider || record.expiresAt <= Date.now()) {
+  if (!record || record.provider !== provider || Number(record.exp ?? record.expiresAt ?? 0) <= Date.now()) {
     const err = new Error(`Invalid or expired ${provider} OAuth state`);
     err.statusCode = 400;
+    err.details = {
+      hint: 'Start again from the /real-oauth/:provider/login URL. Old callback URLs cannot be refreshed.',
+      stateFormat: signedRecord ? 'signed' : localRecord ? 'memory' : 'missing',
+    };
     throw err;
   }
 
-  externalOAuthStateStore.delete(state);
+  // Single-use when the current process still has memory, but stateless deploys
+  // can still complete after a restart because the signature and expiry are valid.
+  if (state) externalOAuthStateStore.delete(state);
 }
 
 async function exchangeExternalOAuthCode(provider, code, state) {
