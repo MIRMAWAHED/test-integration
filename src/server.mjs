@@ -1,5 +1,6 @@
 import http from 'node:http';
 import crypto from 'node:crypto';
+import { createObservableFixture } from './fixture-blackbox-probe.mjs';
 
 const PORT = Number(process.env.PORT || 8080);
 const BASE_URL = (process.env.FIXTURE_BASE_URL || `http://localhost:${PORT}`).replace(/\/$/, '');
@@ -27,6 +28,13 @@ const FIXTURE = {
   jwtSecret: process.env.FIXTURE_JWT_SECRET || 'fixture-jwt-secret',
   hmacSecret: process.env.FIXTURE_HMAC_SECRET || 'fixture-hmac-secret',
 };
+
+// Dedicated synthetic QA endpoints. No env file is required; an optional host
+// override may be used with the tester's matching explicit probe override.
+const { server: blackboxServer } = createObservableFixture({
+  controlKey: process.env.BB_CONTROL_KEY || 'bb-apitrench-fixture-control-v1-20261013',
+});
+const blackboxRoute = blackboxServer.listeners('request')[0];
 
 const codeStore = new Map();
 const accessTokenStore = new Map();
@@ -923,6 +931,10 @@ function isRedirectAllowed(rawRedirectUri) {
 async function route(req, res) {
   const url = new URL(req.url, BASE_URL);
   const pathname = url.pathname;
+
+  if (pathname.startsWith('/bb/') || pathname.startsWith('/__bb/')) {
+    return blackboxRoute(req, res);
+  }
 
   if (req.method === 'GET' && pathname === '/health') {
     return json(res, 200, successPayload('health', { service: 'fixture-api' }));
