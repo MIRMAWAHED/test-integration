@@ -1,6 +1,7 @@
 import http from 'node:http';
 import crypto from 'node:crypto';
 import { createObservableFixture } from './fixture-blackbox-probe.mjs';
+import { pathToFileURL } from 'node:url';
 
 const PORT = Number(process.env.PORT || 8080);
 const BASE_URL = (process.env.FIXTURE_BASE_URL || `http://localhost:${PORT}`).replace(/\/$/, '');
@@ -370,7 +371,7 @@ function getExternalOAuthConfig(provider) {
       redirectUri: FIXTURE.githubRedirectUri,
       authorizationUrl: 'https://github.com/login/oauth/authorize',
       tokenUrl: 'https://github.com/login/oauth/access_token',
-      defaultScopes: ['read:user', 'user:email'],
+      defaultScopes: ['read:user', 'user:email', 'offline_access'],
     };
   }
 
@@ -481,14 +482,14 @@ async function exchangeExternalOAuthCode(provider, code, state) {
     }
   }
 
-  if (!response.ok) {
+  if (!response.ok || tokenPayload?.error) {
     const err = new Error(`${provider} OAuth code exchange failed (${response.status})`);
-    err.statusCode = response.status === 400 || response.status === 401 ? 401 : 502;
+    err.statusCode = (response.ok && tokenPayload?.error) || response.status === 400 || response.status === 401 ? 401 : 502;
     err.providerPayload = tokenPayload;
     throw err;
   }
 
-  if (!tokenPayload || typeof tokenPayload !== 'object' || !tokenPayload.access_token) {
+  if (!tokenPayload || typeof tokenPayload !== 'object' || typeof tokenPayload.access_token !== 'string' || !tokenPayload.access_token.trim()) {
     const err = new Error(`${provider} OAuth token response did not include access_token`);
     err.statusCode = 502;
     err.providerPayload = tokenPayload;
@@ -544,7 +545,7 @@ async function fetchJsonWithBearer(url, token, extraHeaders = {}) {
     try {
       data = JSON.parse(textBody);
     } catch {
-      data = { raw: textBody };
+      data = null;
     }
   }
 
@@ -556,7 +557,13 @@ async function fetchJsonWithBearer(url, token, extraHeaders = {}) {
     throw err;
   }
 
-  return data && typeof data === 'object' && !Array.isArray(data) ? data : {};
+  // GitHub /user/emails is an array; /user and Google's userinfo are objects.
+  if (!data || typeof data !== 'object') {
+    const err = new Error('External OAuth provider returned an invalid JSON response');
+    err.statusCode = 502;
+    throw err;
+  }
+  return data;
 }
 
 async function resolveExternalOAuthProfile(req, provider) {
@@ -586,8 +593,9 @@ async function resolveExternalOAuthProfile(req, provider) {
 
   if (provider === 'github') {
     const headers = {
+      accept: 'application/vnd.github+json',
       'user-agent': 'apitrench-fixture-api',
-      'x-github-api-version': '2022-11-28',
+      'x-github-api-version': '2026-03-10',
     };
 
     const profile = await fetchJsonWithBearer(
@@ -595,6 +603,15 @@ async function resolveExternalOAuthProfile(req, provider) {
       token,
       headers,
     );
+
+    const validId = typeof profile.id === 'number'
+      ? Number.isSafeInteger(profile.id) && profile.id > 0
+      : typeof profile.id === 'string' && /^[1-9][0-9]*$/.test(profile.id);
+    if (Array.isArray(profile) || !validId || typeof profile.login !== 'string' || !profile.login.trim()) {
+      const err = new Error('GitHub returned a profile without a valid user identity');
+      err.statusCode = 502;
+      throw err;
+    }
 
     let primaryEmail = typeof profile.email === 'string' && profile.email ? profile.email : null;
 
@@ -607,11 +624,17 @@ async function resolveExternalOAuthProfile(req, provider) {
         );
 
         if (Array.isArray(emails)) {
-          const primary = emails.find((item) => item?.primary && item?.verified && item?.email) ?? emails.find((item) => item?.email);
-          primaryEmail = typeof primary?.email === 'string' ? primary.email : null;
+          const verified = emails.filter(item => item?.verified === true && typeof item.email === 'string' && item.email.trim());
+          const primary = verified.find(item => item.primary === true) ?? verified[0];
+          primaryEmail = primary ? primary.email.trim() : null;
+        } else {
+          const err = new Error('GitHub returned an invalid email list');
+          err.statusCode = 502;
+          throw err;
         }
-      } catch {
+      } catch (error) {
         // The user may not have granted user:email. Keep the profile usable without it.
+        if (![403, 404].includes(error.providerStatus)) throw error;
       }
     }
 
@@ -758,6 +781,7 @@ function getOpenApi() {
           scopes: {
             'read:user': 'Read GitHub profile',
             'user:email': 'Read GitHub email addresses',
+            offline_access: 'Request expiring access and refresh tokens on GitHub.com',
           },
         },
       },
@@ -812,7 +836,7 @@ function getOpenApi() {
       '/real-oauth/github/login': { get: { tags: ['external-oauth-providers'], operationId: 'githubOAuthLogin', responses: { '302': { description: 'Redirect to GitHub OAuth consent screen' } } } },
       '/real-oauth/github/callback': { get: { tags: ['external-oauth-providers'], operationId: 'githubOAuthCallback', responses: jsonResponse } },
       '/real-oauth/google/profile': { get: { tags: ['external-oauth-providers'], operationId: 'googleOAuthProfile', security: [{ googleOAuth: ['openid', 'email', 'profile'] }], responses: jsonResponse } },
-      '/real-oauth/github/profile': { get: { tags: ['external-oauth-providers'], operationId: 'githubOAuthProfile', security: [{ githubOAuth: ['read:user', 'user:email'] }], responses: jsonResponse } },
+      '/real-oauth/github/profile': { get: { tags: ['external-oauth-providers'], operationId: 'githubOAuthProfile', summary: 'GitHub OAuth profile through fixture', description: 'Agent-visible read tool using the selected GitHub OAuth access token. Never include credentials in the import file.', 'x-apitrench-role': 'tool', 'x-apitrench-import-as-tool': true, 'x-apitrench-safety-level': 'read', security: [{ githubOAuth: ['read:user', 'user:email'] }], responses: jsonResponse } },
       '/exchange/google-oauth-to-jwt': { post: { tags: ['external-oauth-providers', 'chained-workflows'], operationId: 'exchangeGoogleOAuthToJwt', security: [{ googleOAuth: ['openid', 'email', 'profile'] }], responses: jsonResponse } },
       '/exchange/github-oauth-to-jwt': { post: { tags: ['external-oauth-providers', 'chained-workflows'], operationId: 'exchangeGithubOAuthToJwt', security: [{ githubOAuth: ['read:user', 'user:email'] }], responses: jsonResponse } },
       '/exchange/oauth-to-jwt': { post: { tags: ['chained-workflows'], operationId: 'exchangeOauthToJwt', security: [{ fixtureOAuth: ['mint:jwt'] }], responses: jsonResponse } },
@@ -898,9 +922,9 @@ function getDemoCredentials() {
         clientSecret: FIXTURE.githubClientSecret ? '<configured from GITHUB_CLIENT_SECRET>' : '<missing GITHUB_CLIENT_SECRET>',
         fixtureLoginUrl: `${BASE_URL}/real-oauth/github/login`,
         fixtureCallbackUrl: FIXTURE.githubRedirectUri,
-        defaultScopes: ['read:user', 'user:email'],
+        defaultScopes: ['read:user', 'user:email', 'offline_access'],
         tokenAuthMethod: 'client_secret_post',
-        pkceEnabled: false,
+        pkceEnabled: true,
         userinfoMapping: { providerUserId: ['id', 'login'], displayName: ['name', 'login', 'email'] },
       },
     },
@@ -1418,7 +1442,7 @@ async function route(req, res) {
   return notFound(res, req);
 }
 
-const server = http.createServer(async (req, res) => {
+export const server = http.createServer(async (req, res) => {
   try {
     await route(req, res);
   } catch (error) {
@@ -1431,7 +1455,7 @@ const server = http.createServer(async (req, res) => {
   }
 });
 
-server.listen(PORT, '0.0.0.0', () => {
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) server.listen(PORT, '0.0.0.0', () => {
   console.log(`APITrench fixture API listening on ${PORT}`);
   console.log(`OpenAPI: ${BASE_URL}/public/openapi.json`);
 });
